@@ -1,0 +1,42 @@
+services:
+  web:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: coil-audit:latest
+    container_name: coil-audit-web
+    environment:
+      AUDIT_HOST: 0.0.0.0
+      AUDIT_PORT: "8080"
+      AUDIT_DATA_DIR: /data
+    ports:
+      # 宿主机端口可通过环境变量 HOST_PORT 配置，默认 8080
+      - "${HOST_PORT:-8080}:8080"
+    volumes:
+      - audit-data:/data
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:8080/healthz',timeout=2).status==200 else 1)"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+      start_period: 3s
+
+  verify:
+    # 单次校验容器：pytest + HTTP 冒烟 + 0<=-1 证书核对，结束即退出并给出退出码
+    image: coil-audit:latest
+    container_name: coil-audit-verify
+    depends_on:
+      web:
+        condition: service_healthy
+    environment:
+      WEB_URL: http://web:8080
+      VERIFY_SRC_DIR: /srv
+      VERIFY_TIMEOUT_S: "30"
+    volumes:
+      - audit-data:/data
+    command: ["python", "scripts/verify.py"]
+    restart: "no"
+
+volumes:
+  audit-data:

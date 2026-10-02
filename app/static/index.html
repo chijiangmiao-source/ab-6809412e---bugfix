@@ -1,0 +1,318 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>低温磁阱电流安全审计</title>
+<style>
+  :root { --bg:#0f1420; --panel:#171e2e; --line:#2a3550; --fg:#e7ecf5;
+          --muted:#94a3b8; --ok:#34d399; --bad:#f87171; --accent:#60a5fa; }
+  * { box-sizing: border-box; }
+  body { margin:0; background:var(--bg); color:var(--fg);
+         font:14px/1.5 -apple-system,"Segoe UI",Roboto,"PingFang SC","Microsoft YaHei",sans-serif; }
+  header { padding:18px 24px; border-bottom:1px solid var(--line); }
+  header h1 { margin:0; font-size:18px; }
+  header p { margin:4px 0 0; color:var(--muted); font-size:12.5px; }
+  main { max-width:1080px; margin:0 auto; padding:20px 24px 60px; }
+  .panel { background:var(--panel); border:1px solid var(--line);
+           border-radius:10px; padding:16px 18px; margin-bottom:18px; }
+  .panel h2 { margin:0 0 12px; font-size:15px; }
+  label { color:var(--muted); font-size:12.5px; }
+  input[type=text], input[type=number] {
+    background:#0d1320; border:1px solid var(--line); color:var(--fg);
+    border-radius:6px; padding:6px 8px; width:100%; }
+  input[type=number] { width:96px; }
+  .row { display:flex; gap:10px; flex-wrap:wrap; align-items:center; }
+  .grid2 { display:grid; grid-template-columns:1fr 1fr; gap:12px; }
+  table { border-collapse:collapse; width:100%; font-size:13px; }
+  th, td { border-bottom:1px solid var(--line); padding:6px 8px; text-align:left;
+           white-space:nowrap; }
+  th { color:var(--muted); font-weight:600; }
+  .num { font-variant-numeric:tabular-nums; font-family:ui-monospace,Menlo,Consolas,monospace; }
+  button { background:var(--accent); color:#08101f; border:0; border-radius:6px;
+           padding:8px 18px; font-weight:600; cursor:pointer; }
+  button.secondary { background:#26314a; color:var(--fg); }
+  button:disabled { opacity:.5; cursor:not-allowed; }
+  .stable { width:70px; text-align:center; }
+  .del { width:34px; }
+  .del button { background:transparent; color:var(--bad); padding:2px 6px; font-size:15px; }
+  .badge { display:inline-block; padding:2px 10px; border-radius:999px; font-size:12.5px; font-weight:600; }
+  .badge.ok { background:rgba(52,211,153,.15); color:var(--ok); }
+  .badge.bad { background:rgba(248,113,113,.15); color:var(--bad); }
+  .muted { color:var(--muted); }
+  .err { background:rgba(248,113,113,.1); border:1px solid rgba(248,113,113,.4);
+         color:#fecaca; padding:10px 12px; border-radius:8px; margin-top:10px;
+         white-space:pre-wrap; }
+  .scroll { overflow-x:auto; }
+  .frac { color:var(--accent); }
+  .neg { color:var(--bad); }
+  .tag { font-size:11px; color:var(--muted); border:1px solid var(--line);
+         border-radius:4px; padding:0 5px; margin-left:6px; }
+  details { margin-top:10px; }
+  summary { cursor:pointer; color:var(--muted); }
+  .toprow { display:flex; gap:10px; align-items:flex-end; flex-wrap:wrap; }
+  .toprow > div { flex:1; min-width:180px; }
+</style>
+</head>
+<body>
+<header>
+  <h1>低温磁阱电流安全审计</h1>
+  <p>任意精度有理数 Phase-I 单纯形 · Bland 固定枢轴规则 · 结论冻结后按审计编号可重放</p>
+</header>
+<main>
+  <section class="panel">
+    <h2>1. 变量（1–8 个电流）
+      <span style="float:right">
+        <button type="button" class="secondary" id="add-var">+ 变量</button>
+        <button type="button" class="secondary" id="del-var">− 变量</button>
+      </span>
+    </h2>
+    <div id="vars" class="grid2"></div>
+  </section>
+
+  <section class="panel">
+    <h2>2. 整数不等式 a·x ≤ b（至多 48 条；稳定标识随约束记录）</h2>
+    <div class="scroll">
+      <table>
+        <thead><tr>
+          <th class="del"></th>
+          <th id="coef-head" colspan="1">系数 a（按变量顺序）</th>
+          <th>右端 b</th>
+          <th>标签</th>
+          <th class="stable">稳定</th>
+        </tr></thead>
+        <tbody id="cons-body"></tbody>
+      </table>
+    </div>
+    <div class="row" style="margin-top:10px">
+      <button type="button" class="secondary" id="add-con">+ 添加约束</button>
+      <span class="muted" id="con-count"></span>
+    </div>
+  </section>
+
+  <section class="panel">
+    <h2>3. 提交审计 / 按编号取回</h2>
+    <div class="toprow">
+      <div>
+        <label for="audit-id">审计编号 audit_id</label>
+        <input type="text" id="audit-id" placeholder="如 trap-run-2026-09-28-A">
+      </div>
+      <div style="flex:0 0 auto">
+        <button id="submit">提交审计</button>
+        <button class="secondary" id="fetch">按编号取回</button>
+      </div>
+    </div>
+    <div id="form-error"></div>
+  </section>
+
+  <section id="result-panel" class="panel" hidden>
+    <h2>审计结果 <span id="result-badge"></span></h2>
+    <div id="result-meta" class="muted" style="margin-bottom:10px"></div>
+    <div id="result-body"></div>
+  </section>
+</main>
+
+<script>
+const MAX_VARS = 8, MAX_CONS = 48;
+let varCount = 3;
+
+const varsEl = document.getElementById('vars');
+const consBody = document.getElementById('cons-body');
+const coefHead = document.getElementById('coef-head');
+
+function varInputs() {
+  return [...document.querySelectorAll('#vars input')].map(i => i.value.trim());
+}
+
+function renderVars() {
+  const old = varInputs();
+  varsEl.innerHTML = '';
+  for (let i = 0; i < varCount; i++) {
+    const wrap = document.createElement('div');
+    wrap.innerHTML = `<label>变量 x${i+1} 名称</label>
+      <input type="text" data-var="${i}" value="${escapeHtml(old[i] || 'I'+(i+1))}">`;
+    varsEl.appendChild(wrap);
+  }
+  varsEl.querySelectorAll('input').forEach(inp =>
+    inp.addEventListener('change', renderConRows));
+  renderConRows();
+}
+
+function renderConRows() {
+  const names = varInputs();
+  const prevRows = [...consBody.querySelectorAll('tr')].map(tr => ({
+    coeffs: [...tr.querySelectorAll('input.coef')].map(i => i.value),
+    b: tr.querySelector('input.b').value,
+    stable: tr.querySelector('input.stable').checked,
+    label: tr.querySelector('input.lab')?.value || ''
+  }));
+  coefHead.setAttribute('colspan', names.length);
+  coefHead.textContent = '系数 a（' + names.map((n,i)=>`x${i+1}=${n||'?'}`).join(', ') + '）';
+  consBody.innerHTML = '';
+  prevRows.forEach(r => addConRow(r));
+  updateCount();
+}
+
+function addConRow(prefill) {
+  if (consBody.rows.length >= MAX_CONS) return;
+  const names = varInputs();
+  const tr = document.createElement('tr');
+  let cells = '<td class="del"><button type="button" title="删除">×</button></td>';
+  for (let j = 0; j < names.length; j++) {
+    const v = prefill?.coeffs[j] ?? '';
+    cells += `<td><input class="coef num" type="text" inputmode="numeric" value="${escapeAttr(v)}" placeholder="0"></td>`;
+  }
+  const bv = prefill?.b ?? '';
+  const lv = prefill?.label ?? '';
+  cells += `<td><input class="b num" type="text" inputmode="numeric" value="${escapeAttr(bv)}" placeholder="b"></td>`;
+  cells += `<td><input class="lab" type="text" value="${escapeAttr(lv)}" maxlength="200" style="width:130px"></td>`;
+  cells += `<td class="stable"><input class="stable" type="checkbox" ${prefill?.stable ? 'checked':''}></td>`;
+  tr.innerHTML = cells;
+  tr.querySelector('.del button').addEventListener('click', () => { tr.remove(); updateCount(); });
+  consBody.appendChild(tr);
+  updateCount();
+}
+
+function updateCount() {
+  document.getElementById('con-count').textContent =
+    `已录入 ${consBody.rows.length} / ${MAX_CONS} 条`;
+}
+
+function escapeHtml(s) {
+  return String(s).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+}
+function escapeAttr(s) { return escapeHtml(s ?? ''); }
+
+function intToken(s, what) {
+  // 不用 Number()：超过 2^53 的安全约束必须保持任意精度整数原样传输
+  if (!/^[+-]?\d+$/.test(s)) throw new Error(`${what} 必须是整数: ${s}`);
+  return s.replace(/^\+/, '');
+}
+
+function collectPayloadText() {
+  const names = varInputs();
+  if (names.some(n => !n)) throw new Error('请填写全部变量名');
+  if (new Set(names).size !== names.length) throw new Error('变量名不能重复');
+  const auditId = document.getElementById('audit-id').value.trim();
+  if (!auditId) throw new Error('请填写审计编号 audit_id');
+  const cons = [];
+  [...consBody.rows].forEach((tr, i) => {
+    const tokens = [...tr.querySelectorAll('input.coef')].map(inp => {
+      const v = inp.value.trim();
+      if (v === '') return '0';
+      return intToken(v, `第 ${i+1} 条约束系数`);
+    });
+    const bv = tr.querySelector('input.b').value.trim();
+    if (bv === '') throw new Error(`第 ${i+1} 条约束缺少右端 b`);
+    const bToken = intToken(bv, `第 ${i+1} 条约束右端 b`);
+    const stable = tr.querySelector('input.stable').checked ? 'true' : 'false';
+    const labRaw = (tr.querySelector('input.lab')?.value || '').trim();
+    const lab = labRaw ? JSON.stringify(labRaw) : 'null';
+    cons.push(`{"coeffs":[${tokens.join(',')}],"b":${bToken},"label":${lab},"stable":${stable}}`);
+  });
+  if (cons.length < 1) throw new Error('至少录入一条约束');
+  return `{"audit_id":${JSON.stringify(auditId)},"variables":${JSON.stringify(names)},"constraints":[${cons.join(',')}]}`;
+}
+
+function showError(msg) {
+  const el = document.getElementById('form-error');
+  el.innerHTML = msg ? `<div class="err">${escapeHtml(msg)}</div>` : '';
+}
+
+// ---- 结果渲染 ----
+function frac(v) { return `<span class="num frac">${escapeHtml(v)}</span>`; }
+
+function renderResult(rec, replayed) {
+  const panel = document.getElementById('result-panel');
+  panel.hidden = false;
+  const r = rec.result;
+  const badge = document.getElementById('result-badge');
+  if (r.status === 'feasible') {
+    badge.innerHTML = '<span class="badge ok">可行</span>';
+  } else {
+    badge.innerHTML = '<span class="badge bad">无解</span>';
+  }
+  document.getElementById('result-meta').innerHTML =
+    `审计编号 <b>${escapeHtml(rec.audit_id)}</b> · ` +
+    `${replayed ? '重放冻结记录' : '首次冻结'} · ` +
+    `创建于 ${escapeHtml(rec.created_at)} · 枢轴 ${r.pivots} 次 · ` +
+    `载荷指纹 <span class="num">${escapeHtml(rec.fingerprint.slice(0,25))}…</span>`;
+
+  let html = '';
+  if (r.status === 'feasible') {
+    html += '<h3 style="margin:6px 0">有理电流（固定枢轴规则给出的一组精确解）</h3>';
+    html += '<div class="scroll"><table><thead><tr><th>变量</th><th>电流值</th></tr></thead><tbody>';
+    for (const [k, v] of Object.entries(r.currents)) {
+      html += `<tr><td>${escapeHtml(k)}</td><td>${frac(v)}</td></tr>`;
+    }
+    html += '</tbody></table></div>';
+    html += '<h3 style="margin:14px 0 6px">每条约束的精确余量 b − a·x（≥ 0）</h3>';
+    html += '<div class="scroll"><table><thead><tr><th>#</th><th>右端 b</th><th>余量</th></tr></thead><tbody>';
+    for (const m of r.margins) {
+      html += `<tr><td>${m.index+1}${m.label ? ' <span class="tag">'+escapeHtml(m.label)+'</span>':''}</td>`
+           + `<td class="num">${escapeHtml(m.b)}</td><td>${frac(m.residual)}</td></tr>`;
+    }
+    html += '</tbody></table></div>';
+  } else {
+    html += '<p>找到非负有理乘子，使各约束左侧系数相加为零、右侧和严格为负，'
+          + '从而合并出矛盾式 <b>0 ≤ ' + escapeHtml(r.combined_rhs) + '</b>：</p>';
+    html += '<div class="scroll"><table><thead><tr>'
+          + '<th>#</th><th>乘子 μ</th><th>加权系数 μ·a</th><th>加权右端 μ·b</th>'
+          + '</tr></thead><tbody>';
+    for (const t of r.terms) {
+      html += `<tr><td>${t.index+1}${t.label ? ' <span class="tag">'+escapeHtml(t.label)+'</span>':''}</td>`
+           + `<td>${frac(t.multiplier)}</td>`
+           + `<td><span class="num">[${t.weighted_coeffs.map(escapeHtml).join(', ')}]</span></td>`
+           + `<td class="num ${t.weighted_rhs.startsWith('-')?'neg':''}">${escapeHtml(t.weighted_rhs)}</td></tr>`;
+    }
+    html += '</tbody></table></div>';
+    html += `<p style="margin-top:12px">逐项相加合并式：左侧 = <span class="num">[${r.combined_lhs.map(escapeHtml).join(', ')}]</span>`
+          + ` ＝ 0，右侧 = <span class="num neg">${escapeHtml(r.combined_rhs)}</span> &lt; 0</p>`;
+  }
+  document.getElementById('result-body').innerHTML = html;
+}
+
+document.getElementById('add-con').addEventListener('click', () => addConRow());
+document.getElementById('add-var').addEventListener('click', () => {
+  if (varCount < 8) { varCount++; renderVars(); }
+});
+document.getElementById('del-var').addEventListener('click', () => {
+  if (varCount > 1) { varCount--; renderVars(); }
+});
+document.getElementById('submit').addEventListener('click', async () => {
+  showError('');
+  let payloadText;
+  try { payloadText = collectPayloadText(); }
+  catch (e) { showError(e.message); return; }
+  try {
+    const resp = await fetch('/api/audits', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: payloadText
+    });
+    const data = await resp.json();
+    if (!resp.ok) {
+      showError(`[${resp.status}] ${data.error}\n${data.detail || ''}`
+        + (data.existing_fingerprint ? `\n既有指纹: ${data.existing_fingerprint}\n新指纹: ${data.new_fingerprint}` : ''));
+      return;
+    }
+    renderResult(data, data.replayed);
+  } catch (e) { showError('网络错误: ' + e.message); }
+});
+
+document.getElementById('fetch').addEventListener('click', async () => {
+  showError('');
+  const id = document.getElementById('audit-id').value.trim();
+  if (!id) { showError('请填写审计编号'); return; }
+  const resp = await fetch('/api/audits/' + encodeURIComponent(id));
+  const data = await resp.json();
+  if (!resp.ok) { showError(`[${resp.status}] ${data.error || ''}`); return; }
+  renderResult(data, true);
+});
+
+// 初始化
+renderVars();
+addConRow({coeffs: Array(varCount).fill(''), b: '', stable: false});
+</script>
+</body>
+</html>
