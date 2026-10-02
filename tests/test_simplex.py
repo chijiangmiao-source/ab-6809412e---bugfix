@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import itertools
 import random
+from fractions import Fraction
 
 import pytest
 
@@ -139,6 +140,34 @@ def test_certificate_with_internal_rows():
     assert r.multipliers[0] == 1 and r.multipliers[1] == 1
     assert r.combined_rhs == -1
     assert r.terms[0].internal is True
+
+
+def test_zero_multiplier_constraint_kept_in_certificate():
+    """磁阱三约束：I<=0、I>=1 已矛盾，I<=10 的乘子恰为 0。
+
+    证书仍须为第三条约束保留乘子与逐项贡献，相加精确得到 0 <= -1。
+    """
+    cons = [
+        C([1], 0, label="安全上界"),
+        C([-1], -1, label="电源下界"),
+        C([1], 10, label="宽松场强上界"),
+    ]
+    r = assert_infeasible(["I1"], cons)
+    assert r.multipliers == [Fraction(1), Fraction(1), Fraction(0)]
+    assert [t.index for t in r.terms] == [0, 1, 2]
+    assert [t.label for t in r.terms] == [
+        "安全上界", "电源下界", "宽松场强上界"
+    ]
+    assert [t.b for t in r.terms] == [0, -1, 10]
+    # 零乘子条目的加权系数/右端全为 0，但位置保留
+    zero_term = r.terms[2]
+    assert zero_term.coeffs == (Fraction(0),)
+    assert zero_term.rhs == 0
+    assert r.combined_lhs == [Fraction(0)]
+    assert r.combined_rhs == -1
+    d = r.as_dict()
+    assert [m["value"] for m in d["multipliers"]] == ["1", "1", "0"]
+    assert len(d["terms"]) == 3
 
 
 @pytest.mark.parametrize("seed", range(40))

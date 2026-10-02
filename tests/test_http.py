@@ -46,6 +46,42 @@ P_INFEASIBLE = {
     "constraints": [{"coeffs": [0], "b": -1, "stable": True}],
 }
 
+# 磁阱电流：I<=0（安全上界）、I>=1（电源下界）、I<=10（宽松场强上界）
+P_TRAP_THREE = {
+    "audit_id": "trap-three-http",
+    "variables": ["I1"],
+    "constraints": [
+        {"coeffs": [1], "b": 0, "label": "安全上界", "stable": True},
+        {"coeffs": [-1], "b": -1, "label": "电源下界", "stable": True},
+        {"coeffs": [1], "b": 10, "label": "宽松场强上界", "stable": False},
+    ],
+}
+
+
+def _assert_trap_three_evidence(res):
+    """HTTP 证据：三项齐全、第三项乘子为 0、相加恰为 0 <= -1。"""
+    assert res["status"] == "infeasible"
+    assert [t["index"] for t in res["terms"]] == [0, 1, 2]
+    assert [t["label"] for t in res["terms"]] == [
+        "安全上界", "电源下界", "宽松场强上界"
+    ]
+    assert [t["b"] for t in res["terms"]] == ["0", "-1", "10"]
+    assert [m["value"] for m in res["multipliers"]] == ["1", "1", "0"]
+    expected_wcoeffs = [["1"], ["-1"], ["0"]]
+    lhs = Fraction(0)
+    rhs = Fraction(0)
+    for i, t in enumerate(res["terms"]):
+        mu = Fraction(t["multiplier"])
+        assert mu >= 0
+        assert t["weighted_coeffs"] == expected_wcoeffs[i]
+        assert Fraction(t["weighted_rhs"]) == mu * Fraction(t["b"])
+        lhs += Fraction(t["weighted_coeffs"][0])
+        rhs += Fraction(t["weighted_rhs"])
+    assert lhs == 0 and rhs == -1
+    assert res["combined_lhs"] == ["0"]
+    assert res["combined_rhs"] == "-1"
+    assert res["combined_relation"] == "0 <= -1"
+
 
 def test_healthz(server):
     status, body = req(server, "GET", "/healthz")
@@ -185,25 +221,72 @@ def test_404_unknown_id(server):
 
 def test_persistence_across_server_instances(tmp_path):
     data = str(tmp_path / "data")
-
-    def start():
-        import app.web as web
-        web.Handler.service = None
-        httpd = make_server("127.0.0.1", 0, data)
-        t = threading.Thread(target=httpd.serve_forever, daemon=True)
-        t.start()
-        return httpd
-
-    s1 = start()
+    s1 = _start_server(data)
     port1 = s1.server_address[1]
     req(f"http://127.0.0.1:{port1}", "POST", "/api/audits", P_INFEASIBLE)
     s1.shutdown()
     s1.server_close()
 
-    s2 = start()
+    s2 = _start_server(data)
     port2 = s2.server_address[1]
     status, body = req(f"http://127.0.0.1:{port2}", "GET",
                        "/api/audits/cert-1")
     assert status == 200 and body["result"]["combined_rhs"] == "-1"
+    s2.shutdown()
+    s2.server_close()
+
+
+def _start_server(data):
+    import app.web as web
+    web.Handler.service = None
+    httpd = make_server("127.0.0.1", 0, data)
+    t = threading.Thread(target=httpd.serve_forever, daemon=True)
+    t.start()
+    return httpd
+
+
+def test_trap_three_first_submit_keeps_zero_multiplier(server):
+    """三约束首次提交：三项证据齐全，第三项乘子 0，合并式精确为 0 <= -1。"""
+    status, body = req(server, "POST", "/api/audits", P_TRAP_THREE)
+    assert status == 201 and body["replayed"] is False
+    _assert_trap_three_evidence(body["result"])
+
+
+def test_trap_three_same_id_replay_keeps_full_evidence(server):
+    """同号同载荷重传：200 返回同一条完整冻结记录。"""
+    status, body1 = req(server, "POST", "/api/audits", P_TRAP_THREE)
+    assert status == 201
+    status, body2 = req(server, "POST", "/api/audits",
+                        json.loads(json.dumps(P_TRAP_THREE)))
+    assert status == 200 and body2["replayed"] is True
+    _assert_trap_three_evidence(body2["result"])
+    assert body2["fingerprint"] == body1["fingerprint"]
+    assert body2["created_at"] == body1["created_at"]
+    # 按编号读取同样完整
+    status, body3 = req(server, "GET", "/api/audits/trap-three-http")
+    assert status == 200
+    _assert_trap_three_evidence(body3["result"])
+
+
+def test_trap_three_evidence_survives_restart(tmp_path):
+    """服务重启后按编号重开：三项证据、零乘子、指纹与创建时间不变。"""
+    data = str(tmp_path / "data")
+    s1 = _start_server(data)
+    port1 = s1.server_address[1]
+    status, body1 = req(f"http://127.0.0.1:{port1}", "POST",
+                        "/api/audits", P_TRAP_THREE)
+    assert status == 201
+    s1.shutdown()
+    s1.server_close()
+
+    s2 = _start_server(data)
+    port2 = s2.server_address[1]
+    status, body2 = req(f"http://127.0.0.1:{port2}", "GET",
+                        "/api/audits/trap-three-http")
+    assert status == 200
+    _assert_trap_three_evidence(body2["result"])
+    assert body2["fingerprint"] == body1["fingerprint"]
+    assert body2["created_at"] == body1["created_at"]
+    assert body2["payload"] == body1["payload"]
     s2.shutdown()
     s2.server_close()

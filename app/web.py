@@ -133,6 +133,14 @@ class Handler(BaseHTTPRequestHandler):
 
 def make_server(host: str = _HOST, port: int = _PORT, data_dir: str = _DATA_DIR):
     store = AuditStore(data_dir)
+    # 启动时恢复早期版本落盘时丢失零乘子条目的历史残缺证书
+    try:
+        migrated = store.migrate_all()
+        if migrated:
+            print(f"coil-audit 已恢复 {migrated} 条历史冻结证据的完整条目",
+                  flush=True)
+    except OSError as exc:  # 目录不可读不应阻止启动；读取/重放时仍会惰性恢复
+        print(f"coil-audit 启动迁移扫描失败（将惰性恢复）: {exc}", flush=True)
     service = AuditService(store)
     Handler.service = service
     return ThreadingHTTPServer((host, port), Handler)
