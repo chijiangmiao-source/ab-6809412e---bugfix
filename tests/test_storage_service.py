@@ -4,9 +4,11 @@ from __future__ import annotations
 
 import json
 import threading
+from fractions import Fraction
 
 import pytest
 
+from app.models import verify_certificate
 from app.service import AuditService, IdConflictError
 from app.storage import AuditStore, fingerprint
 
@@ -25,6 +27,150 @@ P2_FEASIBLE = {
     "variables": ["x"],
     "constraints": [{"coeffs": [1], "b": 1}],
 }
+
+# 磁阱三约束场景：安全上界 I<=0、电源下界 I>=1、宽松场强上界 I<=10
+P3_ZERO_MULT = {
+    "audit_id": "trap-run-3cons",
+    "variables": ["I1"],
+    "constraints": [
+        {"coeffs": [1], "b": 0, "label": "安全上界", "stable": True},
+        {"coeffs": [-1], "b": -1, "label": "电源下界", "stable": False},
+        {"coeffs": [1], "b": 10, "label": "场强上界", "stable": True},
+    ],
+}
+
+
+def _assert_three_term_certificate(res: dict) -> None:
+    """三条原始约束必须各占一个乘子与一项贡献，第三项乘子为 0。"""
+    assert res["status"] == "infeasible"
+    payload_cons = P3_ZERO_MULT["constraints"]
+    multipliers = res["multipliers"]
+    terms = res["terms"]
+    assert len(multipliers) == 3
+    assert len(terms) == 3
+    # 索引/标签/右端与原始录入顺序一一对应
+    for i, con in enumerate(payload_cons):
+        assert multipliers[i]["index"] == i
+        t = terms[i]
+        assert t["index"] == i
+        assert t["label"] == con["label"]
+        assert t["b"] == str(con["b"])
+        assert t["multiplier"] == multipliers[i]["value"]
+        assert t["weighted_coeffs"] == [
+            str(Fraction(multipliers[i]["value"]) * con["coeffs"][0])
+        ]
+        assert Fraction(t["weighted_rhs"]) == (
+            Fraction(multipliers[i]["value"]) * con["b"]
+        )
+    assert [m["value"] for m in multipliers] == ["1", "1", "0"]
+    verify_certificate(res)
+    # 精确复算合并式 0 <= -1
+    lhs = sum((Fraction(t["weighted_coeffs"][0]) for t in terms), Fraction(0))
+    rhs = sum((Fraction(t["weighted_rhs"]) for t in terms), Fraction(0))
+    assert lhs == 0 and rhs == -1
+    assert res["combined_lhs"] == ["0"]
+    assert res["combined_rhs"] == "-1"
+    assert res["combined_relation"] == "0 <= -1"
+
+
+def test_three_constraints_keeps_zero_multiplier_evidence(tmp_path):
+    svc = make_service(tmp_path)
+    rec, replayed = svc.audit(P3_ZERO_MULT)
+    assert replayed is False
+    _assert_three_term_certificate(rec["result"])
+
+
+def test_three_constraints_replay_and_fetch_stay_complete(tmp_path):
+    data_dir = str(tmp_path / "data")
+    svc = AuditService(AuditStore(data_dir))
+    r1, _ = svc.audit(P3_ZERO_MULT)
+
+    # 相同载荷同号重传：200，三项证据完整且记录完全相同
+    r2, replayed = svc.audit(json.loads(json.dumps(P3_ZERO_MULT)))
+    assert replayed is True
+    _assert_three_term_certificate(r2["result"])
+    assert r2 == r1
+
+    # 按编号重新读取（模拟重启后的新服务实例）
+    svc2 = AuditService(AuditStore(data_dir))
+    r3 = svc2.fetch("trap-run-3cons")
+    _assert_three_term_certificate(r3["result"])
+    assert r3["audit_id"] == r1["audit_id"]
+    assert r3["created_at"] == r1["created_at"]
+    assert r3["fingerprint"] == r1["fingerprint"]
+
+    # 落盘文件本身也必须含三项（而非读取时临时拼接）
+    path = svc2.store._path("trap-run-3cons")
+    with open(path, encoding="utf-8") as f:
+        on_disk = json.load(f)
+    assert len(on_disk["result"]["terms"]) == 3
+    assert "evidence_term_count" not in on_disk["result"]
+
+
+def _legacy_compacted_record(svc: AuditService) -> dict:
+    """构造历史版本落盘的被剔除零乘子条目的冻结记录。"""
+    rec, _ = svc.audit(P3_ZERO_MULT)
+    legacy = json.loads(json.dumps(rec))
+    result = legacy["result"]
+    result["terms"] = [t for t in result["terms"]
+                       if t["multiplier"] != "0"]
+    result["multipliers"] = [m for m in result["multipliers"]
+                             if m["value"] != "0"]
+    result["evidence_term_count"] = 2
+    svc.store._write_atomic("trap-run-3cons", legacy)
+    return legacy
+
+
+def test_legacy_compacted_record_restored_on_fetch(tmp_path):
+    data_dir = str(tmp_path / "data")
+    svc = AuditService(AuditStore(data_dir))
+    legacy = _legacy_compacted_record(svc)
+    assert len(legacy["result"]["terms"]) == 2  # 历史缺失项确实存在
+
+    restored = svc.fetch("trap-run-3cons")
+    _assert_three_term_certificate(restored["result"])
+    # 审计编号、创建时间、载荷指纹、裁决均不得改变
+    assert restored["audit_id"] == legacy["audit_id"]
+    assert restored["created_at"] == legacy["created_at"]
+    assert restored["fingerprint"] == legacy["fingerprint"]
+    assert restored["payload"] == legacy["payload"]
+    assert restored["method"] == legacy["method"]
+    assert restored["result"]["status"] == "infeasible"
+    assert "evidence_term_count" not in restored["result"]
+
+
+def test_legacy_restored_record_idempotent_across_restart(tmp_path):
+    data_dir = str(tmp_path / "data")
+    svc = AuditService(AuditStore(data_dir))
+    legacy = _legacy_compacted_record(svc)
+
+    # 重启后的新实例读取即恢复
+    svc2 = AuditService(AuditStore(data_dir))
+    got = svc2.fetch("trap-run-3cons")
+    _assert_three_term_certificate(got["result"])
+    assert got["created_at"] == legacy["created_at"]
+    assert got["fingerprint"] == legacy["fingerprint"]
+
+    # 恢复后相同载荷重传仍为幂等重放，记录不再被改动
+    rec, replayed = svc2.audit(json.loads(json.dumps(P3_ZERO_MULT)))
+    assert replayed is True
+    _assert_three_term_certificate(rec["result"])
+    assert rec["created_at"] == legacy["created_at"]
+
+    svc3 = AuditService(AuditStore(data_dir))
+    again = svc3.fetch("trap-run-3cons")
+    assert again == rec
+
+
+def test_legacy_restored_record_still_conflicts_on_changed_payload(tmp_path):
+    svc = make_service(tmp_path)
+    _legacy_compacted_record(svc)
+    restored = svc.fetch("trap-run-3cons")
+    changed = json.loads(json.dumps(P3_ZERO_MULT))
+    changed["constraints"][2]["b"] = 11
+    with pytest.raises(IdConflictError):
+        svc.audit(changed)
+    assert svc.fetch("trap-run-3cons") == restored
 
 
 def test_first_submit_freezes(tmp_path):

@@ -126,6 +126,71 @@ def check_certificate(audit_id: str, payload: dict, expect_rhs: str) -> dict:
     return res
 
 
+def check_zero_multiplier_evidence() -> None:
+    """磁阱三约束场景：每条原始约束都必须保留乘子与合并式贡献。
+
+    安全上界 I<=0、电源下界 I>=1 已构成矛盾；宽松场强上界 I<=10
+    的乘子恰为 0，但其条目、标签、系数、右端仍须逐项在案。
+    """
+    step("三约束场景：零乘子条目不允许从冻结证据中缺失")
+    audit_id = "verify-trap-three-constraints"
+    payload = {
+        "audit_id": audit_id,
+        "variables": ["I1"],
+        "constraints": [
+            {"coeffs": [1], "b": 0, "label": "安全上界", "stable": True},
+            {"coeffs": [-1], "b": -1, "label": "电源下界", "stable": False},
+            {"coeffs": [1], "b": 10, "label": "场强上界", "stable": True},
+        ],
+    }
+
+    def assert_complete(res: dict) -> None:
+        terms = res["terms"]
+        multipliers = res["multipliers"]
+        assert len(terms) == 3, f"必须保留三项逐项贡献，实际 {len(terms)}"
+        assert len(multipliers) == 3
+        for i, con in enumerate(payload["constraints"]):
+            t, mu_entry = terms[i], multipliers[i]
+            assert t["index"] == i and mu_entry["index"] == i
+            assert t["label"] == con["label"]
+            assert t["b"] == str(con["b"])
+            assert t["multiplier"] == mu_entry["value"]
+            mu = Fraction(t["multiplier"])
+            assert Fraction(t["weighted_coeffs"][0]) == mu * con["coeffs"][0]
+            assert Fraction(t["weighted_rhs"]) == mu * con["b"]
+        assert [m["value"] for m in multipliers] == ["1", "1", "0"], (
+            "第三项（宽松场强上界）乘子必须为 0 且条目保留"
+        )
+        lhs = sum((Fraction(t["weighted_coeffs"][0]) for t in terms),
+                  Fraction(0))
+        rhs = sum((Fraction(t["weighted_rhs"]) for t in terms), Fraction(0))
+        assert lhs == 0 and rhs == -1, f"合并式必须为 0 <= -1，实际 {lhs} <= {rhs}"
+        assert res["combined_lhs"] == ["0"]
+        assert res["combined_rhs"] == "-1"
+        assert res["combined_relation"] == "0 <= -1"
+
+    # 首次提交
+    status, body = http("POST", "/api/audits", payload)
+    assert status == 201 and body["replayed"] is False, (status, body)
+    assert_complete(body["result"])
+    frozen_fp, frozen_at = body["fingerprint"], body["created_at"]
+    print("[3约束] 首次提交含三项证据，第三项乘子为 0，合并式 0 <= -1")
+
+    # 相同载荷同号重传
+    status, body = http("POST", "/api/audits", json.loads(json.dumps(payload)))
+    assert status == 200 and body["replayed"] is True
+    assert_complete(body["result"])
+    assert body["fingerprint"] == frozen_fp and body["created_at"] == frozen_at
+    print("[3约束] 同号重传返回完整且相同的冻结证据 (200)")
+
+    # 按编号重新读取（等价于服务重启后的重开）
+    status, body = http("GET", f"/api/audits/{audit_id}")
+    assert status == 200
+    assert_complete(body["result"])
+    assert body["fingerprint"] == frozen_fp and body["created_at"] == frozen_at
+    print("[3约束] 按编号重开返回完整且相同的冻结证据")
+
+
 def main() -> int:
     run_pytest()
     wait_healthy()
@@ -157,6 +222,9 @@ def main() -> int:
         },
         "-1",
     )
+
+    # 组 3: 三约束含零乘子条目（I<=0、I>=1、I<=10），证据必须逐项完整
+    check_zero_multiplier_evidence()
 
     step("可行系统冒烟: 1 <= x <= 2")
     p = {

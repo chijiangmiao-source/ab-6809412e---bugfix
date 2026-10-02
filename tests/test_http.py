@@ -46,6 +46,40 @@ P_INFEASIBLE = {
     "constraints": [{"coeffs": [0], "b": -1, "stable": True}],
 }
 
+# 磁阱三约束：安全上界 I<=0、电源下界 I>=1、宽松场强上界 I<=10（乘子必为 0）
+P_TRAP_ZERO_MULT = {
+    "audit_id": "trap-3cons",
+    "variables": ["I1"],
+    "constraints": [
+        {"coeffs": [1], "b": 0, "label": "安全上界", "stable": True},
+        {"coeffs": [-1], "b": -1, "label": "电源下界", "stable": False},
+        {"coeffs": [1], "b": 10, "label": "场强上界", "stable": True},
+    ],
+}
+
+
+def _assert_full_three_term_evidence(res: dict) -> None:
+    assert res["status"] == "infeasible"
+    multipliers = res["multipliers"]
+    terms = res["terms"]
+    assert [m["index"] for m in multipliers] == [0, 1, 2]
+    assert [t["index"] for t in terms] == [0, 1, 2]
+    assert [m["value"] for m in multipliers] == ["1", "1", "0"]
+    for i, con in enumerate(P_TRAP_ZERO_MULT["constraints"]):
+        t = terms[i]
+        assert t["label"] == con["label"]
+        assert t["b"] == str(con["b"])
+        assert t["multiplier"] == multipliers[i]["value"]
+        mu = Fraction(t["multiplier"])
+        assert Fraction(t["weighted_coeffs"][0]) == mu * con["coeffs"][0]
+        assert Fraction(t["weighted_rhs"]) == mu * con["b"]
+    lhs = sum((Fraction(t["weighted_coeffs"][0]) for t in terms), Fraction(0))
+    rhs = sum((Fraction(t["weighted_rhs"]) for t in terms), Fraction(0))
+    assert lhs == 0 and rhs == -1
+    assert res["combined_lhs"] == ["0"]
+    assert res["combined_rhs"] == "-1"
+    assert res["combined_relation"] == "0 <= -1"
+
 
 def test_healthz(server):
     status, body = req(server, "GET", "/healthz")
@@ -177,6 +211,47 @@ def test_huge_integer_preserves_precision(server):
     assert body["result"]["status"] == "infeasible"
     assert Fraction(body["result"]["combined_rhs"]) == -z
     assert body["result"]["terms"][0]["multiplier"] == "1"
+
+
+def test_trap_three_constraints_full_evidence_first_replay_restart(tmp_path):
+    """三约束场景：首次提交、同号重传、重启后重开均含三项证据。"""
+    data = str(tmp_path / "data")
+
+    def start():
+        import app.web as web
+        web.Handler.service = None
+        httpd = make_server("127.0.0.1", 0, data)
+        t = threading.Thread(target=httpd.serve_forever, daemon=True)
+        t.start()
+        return httpd
+
+    # 首次提交
+    s1 = start()
+    url1 = f"http://127.0.0.1:{s1.server_address[1]}"
+    status, body = req(url1, "POST", "/api/audits", P_TRAP_ZERO_MULT)
+    assert status == 201 and body["replayed"] is False
+    _assert_full_three_term_evidence(body["result"])
+    first = body
+    # 同号重传 -> 200，完整证据且为同一冻结记录
+    status, body = req(url1, "POST", "/api/audits",
+                       json.loads(json.dumps(P_TRAP_ZERO_MULT)))
+    assert status == 200 and body["replayed"] is True
+    _assert_full_three_term_evidence(body["result"])
+    assert body["fingerprint"] == first["fingerprint"]
+    assert body["created_at"] == first["created_at"]
+    s1.shutdown()
+    s1.server_close()
+
+    # 服务重启后按编号重开 -> 仍含三项
+    s2 = start()
+    url2 = f"http://127.0.0.1:{s2.server_address[1]}"
+    status, body = req(url2, "GET", "/api/audits/trap-3cons")
+    assert status == 200
+    _assert_full_three_term_evidence(body["result"])
+    assert body["fingerprint"] == first["fingerprint"]
+    assert body["created_at"] == first["created_at"]
+    s2.shutdown()
+    s2.server_close()
 
 
 def test_404_unknown_id(server):
